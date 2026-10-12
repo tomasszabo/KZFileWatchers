@@ -5,7 +5,7 @@
 **Swift language mode: 6 | Minimum tools/compiler: 6.2 | Platforms:
 macOS 12+, iOS 15+, tvOS 15+**
 
-This fork's `modernization/swift6` branch compiles **all Swift targets in Swift 6
+This fork's `master` branch compiles **all Swift targets in Swift 6
 language mode**, including the optional Objective-C adapters. It requires Swift
 tools/compiler **6.2+**, macOS 12+, iOS 15+ or
 tvOS 15+. There are no third-party package dependencies. This is a breaking API
@@ -31,10 +31,8 @@ migration, not just compilation with a newer compiler.
          branch: "master")
 ```
 
-The migration is currently on `modernization/swift6`. The installation examples
-intentionally use **`master` for after the PR is merged**. Until then, select
-`modernization/swift6` to try Swift 6. Pin a reviewed commit for reproducible
-builds; these examples do not imply the PR is already merged.
+Swift 6 support is available on **`master`**. Pin a reviewed commit and commit
+the consuming application's `Package.resolved` for reproducible builds.
 
 Add the `KZFileWatchers` product. For Objective-C use, add
 `KZFileWatchersObjC`, import that module and call adapters from the main thread.
@@ -53,7 +51,7 @@ pod 'KZFileWatchers', :git => 'https://github.com/tomasszabo/KZFileWatchers.git'
 The fork podspec includes the Objective-C wrappers in the same module and sets
 Swift 6 mode. Use a Swift 6.2+ compiler, even though the language setting is `6.0`.
 Legacy examples and their vendored Pods are historical and are not the supported
-Swift 6 build surface. The installation instructions below describe upstream.
+Swift 6 build surface.
 
 ### Validation
 
@@ -124,7 +122,8 @@ KZFileWatchers is available through [CocoaPods](http://cocoapods.org) and [Swift
 In order to install KZFileWatchers by using CocoaPods, simply add the following line to your Podfile:
 
 ```ruby
-pod "KZFileWatchers"
+pod 'KZFileWatchers', :git => 'https://github.com/tomasszabo/KZFileWatchers.git',
+                    :branch => 'master'
 ```
 
 Last version to support Swift 2.3 is `0.1.2`
@@ -132,7 +131,7 @@ Last version to support Swift 3.0 is `1.0.4`
 
 ### Swift Package Manager
 
-Installing KZFileWatchers over SwiftPM is only supported since version 1.0.1. You just need to add it as a dependency to your Package.swift manifest:
+Add this fork as a dependency to your Package.swift manifest:
 
 ```swift
 import PackageDescription
@@ -140,14 +139,14 @@ import PackageDescription
 let package = Package(
     name: "YourProject",
     dependencies: [
-        .package(url: "https://github.com/krzysztofzablocki/KZFileWatchers.git", from: "1.1.0"),
+        .package(url: "https://github.com/tomasszabo/KZFileWatchers.git", branch: "master"),
         // other dependencies
     ],
     targets: [
         .executableTarget(name: "YourApp", dependencies: [
             .product(name: "KZFileWatchers", package: "KZFileWatchers"),
             // other dependencies
-        ]
+        ])
     ]
 )
 ```
