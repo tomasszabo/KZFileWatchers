@@ -2,6 +2,9 @@
 
 ## Swift 6 fork
 
+**Swift language mode: 6 | Minimum tools/compiler: 6.2 | Platforms:
+macOS 12+, iOS 15+, tvOS 15+**
+
 This fork's `modernization/swift6` branch compiles **all Swift targets in Swift 6
 language mode**, including the optional Objective-C adapters. It requires Swift
 tools/compiler **6.2+** (for isolated deinitialization), macOS 12+, iOS 15+ or
@@ -27,6 +30,11 @@ migration, not just compilation with a newer compiler.
 .package(url: "https://github.com/tomasszabo/KZFileWatchers.git",
          branch: "modernization/swift6")
 ```
+
+The migration is currently on `modernization/swift6`. **After the PR is merged
+into this fork's `master`**, use `branch: "master"` in the SPM example above and
+`:branch => 'master'` in the CocoaPods example below. Pin a reviewed commit for
+reproducible builds; these instructions do not imply the PR is already merged.
 
 Add the `KZFileWatchers` product. For Objective-C use, add
 `KZFileWatchersObjC`, import that module and call adapters from the main thread.
