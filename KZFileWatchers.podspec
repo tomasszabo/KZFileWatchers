@@ -18,7 +18,7 @@ A micro-framework for observing file changes, both local and remote. Helpful in 
   s.homepage         = 'https://github.com/tomasszabo/KZFileWatchers'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
   s.author           = { 'Krzysztof Zabłocki' => 'krzysztof.zablocki@pixle.pl' }
-  s.source           = { :git => 'https://github.com/tomasszabo/KZFileWatchers.git', :branch => 'modernization/swift6' }
+  s.source           = { :git => 'https://github.com/tomasszabo/KZFileWatchers.git', :branch => 'master' }
   s.social_media_url = 'https://twitter.com/merowing_'
   s.swift_version    = '6.0'
 
