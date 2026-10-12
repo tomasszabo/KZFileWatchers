@@ -6,10 +6,14 @@
 //
 
 import Foundation
+#if SWIFT_PACKAGE
+import KZFileWatchers
+#endif
 
 /**
 Watcher for local files, it uses content diffing.
 */
+@MainActor
 @objc
 public final class LocalFileWatcher: NSObject {
 	
@@ -51,12 +55,18 @@ public final class LocalFileWatcher: NSObject {
 extension LocalFileWatcher: FileWatcherInput {
 	
 	public func start() throws {
-		try localWatcher.start { (result) in
-			switch result {
-			case .noChanges:
-				self.delegate?.refreshDidOccur(from: self, type: .noChanges, data: nil)
-			case .updated(let data):
-				self.delegate?.refreshDidOccur(from: self, type: .updated, data: data)
+		try localWatcher.start { [weak self] result in
+			Task { @MainActor [weak self] in
+				guard let self else { return }
+				switch result {
+				case .noChanges:
+					self.delegate?.refreshDidOccur(from: self, type: .noChanges, data: nil)
+				case .updated(let data):
+					self.delegate?.refreshDidOccur(from: self, type: .updated, data: data)
+				case .failed(let error):
+					NSLog("Local watcher failed: %@", String(describing: error))
+					self.delegate?.refreshDidFail?(from: self, error: error as NSError)
+				}
 			}
 		}
 	}

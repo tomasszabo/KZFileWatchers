@@ -10,6 +10,7 @@ import Foundation
 /**
 Protocol for essence, that responsible for file refresh processing.
 */
+@MainActor
 @objc(FileWatcherDelegate)
 public protocol FileWatcherOutput: NSObjectProtocol {
 	
@@ -20,11 +21,13 @@ public protocol FileWatcherOutput: NSObjectProtocol {
 	///   - type: Status of refresh result.
 	///   - data: Content from file.
 	func refreshDidOccur(from fileWatcher: FileWatcherInput, type: RefreshResultType, data: Data?)
+	@objc optional func refreshDidFail(from fileWatcher: FileWatcherInput, error: NSError)
 }
 
 /**
 Protocol for File Watchers.
 */
+@MainActor
 @objc(FileWatcherProtocol)
 public protocol FileWatcherInput: NSObjectProtocol {
 	

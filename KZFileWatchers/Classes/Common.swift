@@ -13,7 +13,7 @@ public enum FileWatcher {
     /**
      Errors that can be thrown from `FileWatcherProtocol`.
      */
-    public enum Error: Swift.Error {
+    public enum Error: Swift.Error, Equatable {
         
         /**
          Trying to perform operation on watcher that requires started state.
@@ -34,12 +34,13 @@ public enum FileWatcher {
          Failed to start the watcher, `reason` will contain more information why.
          */
         case failedToStart(reason: String)
+        case refreshFailed(reason: String)
     }
     
     /**
      Enum that contains status of refresh result.
      */
-    public enum RefreshResult {
+    public enum RefreshResult: Sendable {
         /**
          Watched file didn't change since last update.
          */
@@ -49,16 +50,18 @@ public enum FileWatcher {
          Watched file did change.
          */
         case updated(data: Data)
+        case failed(error: FileWatcher.Error)
     }
     
     /// Closure used for File watcher updates.
-    public typealias UpdateClosure = (RefreshResult) -> Void
+    public typealias UpdateClosure = @Sendable (RefreshResult) -> Void
 }
 
 /**
  *  Minimal interface all File Watchers have to implement.
  */
-public protocol FileWatcherProtocol {
+@MainActor
+public protocol FileWatcherProtocol: AnyObject {
     /**
      Starts observing file changes, a file watcher can only have one callback.
      

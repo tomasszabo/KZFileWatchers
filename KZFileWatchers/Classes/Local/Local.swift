@@ -4,186 +4,154 @@
 //
 //  Created by Krzysztof Zabłocki on 05/08/16.
 //
-//
 
 import Foundation
 
 public extension FileWatcher {
-    
-    /**
-     Watcher for local files, it uses content diffing.
-     */
+    /// Main-actor-owned local watcher with content diffing and coalesced file events.
+    @MainActor
     final class Local: FileWatcherProtocol {
-        private typealias CancelBlock = () -> Void
-        
-        private enum State {
-            case Started(source: DispatchSourceFileSystemObject, fileHandle: CInt, callback: FileWatcher.UpdateClosure, cancel: CancelBlock)
-            case Stopped
-        }
-        
         private let path: String
         private let refreshInterval: TimeInterval
         private let queue: DispatchQueue
-        
-        private var state: State = .Stopped
-        private var isProcessing: Bool = false
-        private var cancelReload: CancelBlock?
+        private var source: DispatchSourceLifetime?
+        private var callback: UpdateClosure?
+        private var reloadTask: Task<Void, Never>?
         private var previousContent: Data?
-        
-        /**
-         Initializes watcher to specified path.
-         
-         - parameter path:     Path of file to observe.
-         - parameter refreshInterval: Refresh interval to use for updates.
-         - parameter queue:    Queue to use for firing `onChange` callback.
-         
-         - note: By default it throttles to 60 FPS, some editors can generate stupid multiple saves that mess with file system e.g. Sublime with AutoSave plugin is a mess and generates different file sizes, this will limit wasted time trying to load faster than 60 FPS, and no one should even notice it's throttled.
-         */
-        public init(path: String, refreshInterval: TimeInterval = 1/60, queue: DispatchQueue = DispatchQueue.main) {
+        private var generation = 0
+
+        /// `queue` controls callback delivery, not watcher state ownership.
+        public init(path: String, refreshInterval: TimeInterval = 1 / 60,
+                    queue: DispatchQueue = .main) {
             self.path = path
             self.refreshInterval = refreshInterval
             self.queue = queue
         }
-        
-        /**
-         Starts observing file changes.
-         
-         - throws: FileWatcher.Error
-         */
-        public func start(closure: @escaping FileWatcher.UpdateClosure) throws {
-            guard case .Stopped = state else { throw Error.alreadyStarted }
-            try startObserving(closure)
+
+        public func start(closure: @escaping UpdateClosure) throws {
+            guard callback == nil else { throw Error.alreadyStarted }
+            guard refreshInterval.isFinite, refreshInterval > 0, refreshInterval <= 1_000_000_000 else {
+                throw Error.failedToStart(reason: "Refresh interval must be positive and at most 1,000,000,000 seconds")
+            }
+            try observe()
+            callback = closure
+            previousContent = nil
+            refresh()
         }
-        
-        /**
-         Stops observing file changes.
-         */
+
         public func stop() throws {
-            guard case let .Started(_, _, _, cancel) = state else { throw Error.alreadyStopped }
-            cancelReload?()
-            cancelReload = nil
-            cancel()
-            
-            isProcessing = false
-            state = .Stopped
+            guard callback != nil else { throw Error.alreadyStopped }
+            generation += 1
+            reloadTask?.cancel()
+            reloadTask = nil
+            source?.cancel()
+            source = nil
+            callback = nil
         }
-        
+
         deinit {
-            if case .Started = state {
-                _ = try? stop()
-            }
+            reloadTask?.cancel()
+            source?.cancel()
         }
-        
-        private func startObserving(_ closure: @escaping FileWatcher.UpdateClosure) throws {
+
+        private func observe() throws {
             let handle = open(path, O_EVTONLY)
-            
-            if handle == -1 {
-                throw Error.failedToStart(reason: "Failed to open file")
+            guard handle >= 0 else {
+                throw Error.failedToStart(reason: "Cannot open \(path): \(String(cString: strerror(errno)))")
             }
-            
             let source = DispatchSource.makeFileSystemObjectSource(
                 fileDescriptor: handle,
                 eventMask: [.delete, .write, .extend, .attrib, .link, .rename, .revoke],
-                queue: queue
+                queue: .main
             )
-            
-            let cancelBlock = {
+            let token = generation
+            source.setEventHandler { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.generation == token, self.callback != nil else { return }
+                    self.scheduleReload()
+                }
+            }
+            source.setCancelHandler { close(handle) }
+            source.resume()
+            self.source = DispatchSourceLifetime(source)
+        }
+
+        // Dispatch source cancellation is thread-safe. Keeping the immutable handle
+        // in a Sendable owner avoids executor-hopping deinit runtime bugs on older OSes.
+        private final class DispatchSourceLifetime: @unchecked Sendable {
+            private let source: any DispatchSourceFileSystemObject
+
+            init(_ source: any DispatchSourceFileSystemObject) {
+                self.source = source
+            }
+
+            func cancel() {
                 source.cancel()
             }
-            
-            source.setEventHandler {
-                let flags = source.data
-                
-                if flags.contains(.delete) || flags.contains(.rename) {
-                    _ = try? self.stop()
-                    do {
-                        try self.startObserving(closure)
-                    } catch {
-                        self.queue.asyncAfter(deadline: .now() + self.refreshInterval) {
-                            _ = try? self.startObserving(closure)
-                        }
-                    }
+
+            deinit {
+                source.cancel()
+            }
+        }
+
+        private func scheduleReload() {
+            reloadTask?.cancel()
+            let token = generation
+            let interval = refreshInterval
+            reloadTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self?.deliver(.failed(error: .refreshFailed(reason: error.localizedDescription)))
                     return
                 }
-                
-                self.needsToReload()
+                guard let self else { return }
+                guard self.generation == token, self.callback != nil else { return }
+                // Editors commonly replace the inode during an atomic save.
+                self.source?.cancel()
+                self.source = nil
+                do {
+                    try self.observe()
+                    self.refresh()
+                } catch {
+                    self.deliver(.failed(error: .refreshFailed(reason: error.localizedDescription)))
+                    self.scheduleReload()
+                }
             }
-            
-            source.setCancelHandler {
-                close(handle)
-            }
-            
-            source.resume()
-            
-            state = .Started(source: source, fileHandle: handle, callback: closure, cancel: cancelBlock)
-            refresh()
         }
-        
-        private func needsToReload() {
-            guard case .Started = state else { return }
-            
-            cancelReload?()
-            cancelReload = throttle(after: refreshInterval) { self.refresh() }
-        }
-        
-        /**
-         Force refresh, can only be used if the watcher was started and it's not processing.
-         */
+
+        /// Read immediately; a stopped watcher does not emit callbacks.
         public func refresh() {
-            guard case let .Started(_, _, closure, _) = state, isProcessing == false else { return }
-            isProcessing = true
-            
-            let url = URL(fileURLWithPath: path)
-            guard let content = try? Data(contentsOf: url, options: .uncached) else {
-                isProcessing = false
-                return
-            }
-            
-            if content != previousContent {
+            guard callback != nil else { return }
+            do {
+                let content = try Data(contentsOf: URL(fileURLWithPath: path), options: .uncached)
+                let result: RefreshResult = content == previousContent ? .noChanges : .updated(data: content)
                 previousContent = content
-                queue.async {
-                    closure(.updated(data: content))
-                }
-            } else {
-                queue.async {
-                    closure(.noChanges)
-                }
+                deliver(result)
+            } catch {
+                deliver(.failed(error: .refreshFailed(reason: error.localizedDescription)))
             }
-            
-            isProcessing = false
-            cancelReload = nil
         }
-        
-        private func throttle(after: Double, action: @escaping () -> Void) -> CancelBlock {
-            var isCancelled = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + after) {
-                if !isCancelled {
-                    action()
-                }
-            }
-            
-            return {
-                isCancelled = true
+
+        private func deliver(_ result: RefreshResult) {
+            let token = generation
+            // Recheck lifecycle before handing a callback to its delivery queue.
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == token, let callback = self.callback else { return }
+                self.queue.async { callback(result) }
             }
         }
     }
-    
 }
-
 
 public extension FileWatcher.Local {
     #if targetEnvironment(simulator)
-    
-    /**
-     Returns username of OSX machine when running on simulator.
-     
-     - returns: Username (if available)
-     */
-    class func simulatorOwnerUsername() -> String {
-        //! running on simulator so just grab the name from home dir /Users/{username}/Library...
-        let usernameComponents = NSHomeDirectory().components(separatedBy: "/")
-        guard usernameComponents.count > 2 else { fatalError() }
-        return usernameComponents[2]
+    nonisolated class func simulatorOwnerUsername() -> String {
+        let components = NSHomeDirectory().components(separatedBy: "/")
+        guard components.count > 2 else { return NSUserName() }
+        return components[2]
     }
     #endif
 }
