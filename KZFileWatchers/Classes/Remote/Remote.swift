@@ -4,173 +4,141 @@
 //
 //  Created by Krzysztof Zabłocki on 05/08/16.
 //
-//
+
 import Foundation
 
 public extension FileWatcher {
-    
-    /**
-     Watcher for remote files, it supports both ETag and Last-Modified HTTP header tags.
-     */
+    /// Main-actor-owned remote watcher with conditional HTTP requests.
+    @MainActor
     final class Remote: FileWatcherProtocol {
-        private enum State {
-            case started(sessionHandler: URLSessionHandler, timer: Timer)
-            case stopped
+        internal static var sessionConfiguration: URLSessionConfiguration {
+            let configuration = URLSessionConfiguration.default
+            configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            return configuration
         }
-        
-        fileprivate struct Constants {
-            static let IfModifiedSinceKey = "If-Modified-Since"
-            static let LastModifiedKey = "Last-Modified"
-            static let IfNoneMatchKey = "If-None-Match"
-            static let ETagKey = "Etag"
-        }
-        
-        internal static var sessionConfiguration: URLSessionConfiguration = {
-            let config = URLSessionConfiguration.default
-            config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            return config
-        }()
-        
-        
-        /// URL that this watcher is observing.
+
         let url: URL
-        
-        /// The minimal amount of time between querying the `url` again.
         let refreshInterval: TimeInterval
-        
-        private var state: State = .stopped
-        
-        /**
-         Creates a new watcher using given URL and refreshInterval.
-         
-         - parameter url:             URL to observe.
-         - parameter refreshInterval: Minimal refresh interval between queries.
-         */
-        public init(url: URL, refreshInterval: TimeInterval = 1) {
+        private let configuration: URLSessionConfiguration
+        private var session: SessionLifetime?
+        private var callback: UpdateClosure?
+        private var pollingTask: Task<Void, Never>?
+        private var requestTask: Task<Void, Never>?
+        private var lastModified: String?
+        private var lastETag: String?
+        private var previousContent: Data?
+        private var generation = 0
+
+        public init(url: URL, refreshInterval: TimeInterval = 1,
+                    sessionConfiguration: URLSessionConfiguration? = nil) {
             self.url = url
             self.refreshInterval = refreshInterval
+            self.configuration = sessionConfiguration ?? Remote.sessionConfiguration
         }
-        
-        deinit {
-            _ = try? stop()
-        }
-        
-        public func start(closure: @escaping FileWatcher.UpdateClosure) throws {
-            guard case .stopped = state else {
-                throw FileWatcher.Error.alreadyStarted
+
+        public func start(closure: @escaping UpdateClosure) throws {
+            guard callback == nil else { throw Error.alreadyStarted }
+            guard refreshInterval.isFinite, refreshInterval > 0, refreshInterval <= 1_000_000_000,
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+                throw Error.failedToStart(reason: "An HTTP(S) URL and an interval between 0 and 1,000,000,000 seconds are required")
             }
-            
-            let timer = Timer.scheduledTimer(timeInterval: refreshInterval, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
-            state = .started(sessionHandler: URLSessionHandler(url: url, sessionConfiguration: FileWatcher.Remote.sessionConfiguration, callback: closure), timer: timer)
-            
-            timer.fire()
+            callback = closure
+            session = SessionLifetime(configuration: configuration)
+            lastModified = nil
+            lastETag = nil
+            previousContent = nil
+            try refresh()
+            pollingTask = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    guard let interval = self?.refreshInterval else { return }
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        self?.callback?(.failed(error: .refreshFailed(reason: error.localizedDescription)))
+                        return
+                    }
+                    guard let self, self.callback != nil else { return }
+                    do {
+                        try self.refresh()
+                    } catch {
+                        self.callback?(.failed(error: .refreshFailed(reason: error.localizedDescription)))
+                    }
+                }
+            }
         }
-        
+
         public func stop() throws {
-            guard case let .started(_, timer) = state else { return }
-            timer.invalidate()
-            state = .stopped
+            guard callback != nil else { return }
+            generation += 1
+            pollingTask?.cancel()
+            requestTask?.cancel()
+            pollingTask = nil
+            requestTask = nil
+            session = nil
+            callback = nil
         }
-        
-        /**
-         Force refresh, can only be used if the watcher was started.
-         
-         - throws: `FileWatcher.Error.notStarted`
-         */
+
+        isolated deinit {
+            pollingTask?.cancel()
+            requestTask?.cancel()
+        }
+
+        /// Trigger a request unless one is already in flight.
         @objc public func refresh() throws {
-            guard case let .started(handler, _) = state else { throw Error.notStarted }
-            handler.refresh()
+            guard let session, callback != nil else { throw Error.notStarted }
+            guard requestTask == nil else { return }
+            var request = URLRequest(url: url)
+            request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
+            request.setValue(lastETag, forHTTPHeaderField: "If-None-Match")
+            let token = generation
+            requestTask = Task { @MainActor [weak self] in
+                guard !Task.isCancelled else { return }
+                do {
+                    let (data, response) = try await session.value.data(for: request)
+                    guard let self, self.generation == token, let callback = self.callback else { return }
+                    self.requestTask = nil
+                    guard let response = response as? HTTPURLResponse else {
+                        callback(.failed(error: .refreshFailed(reason: "Expected an HTTP response")))
+                        return
+                    }
+                    if response.statusCode == 304 {
+                        callback(.noChanges)
+                        return
+                    }
+                    guard (200...299).contains(response.statusCode) else {
+                        callback(.failed(error: .refreshFailed(reason: "HTTP \(response.statusCode)")))
+                        return
+                    }
+                    self.lastModified = response.value(forHTTPHeaderField: "Last-Modified")
+                    self.lastETag = response.value(forHTTPHeaderField: "ETag")
+                    let result: RefreshResult = data == self.previousContent ? .noChanges : .updated(data: data)
+                    self.previousContent = data
+                    callback(result)
+                } catch {
+                    guard let self, self.generation == token, let callback = self.callback else { return }
+                    self.requestTask = nil
+                    guard !Task.isCancelled else { return }
+                    callback(.failed(error: .refreshFailed(reason: error.localizedDescription)))
+                }
+            }
+
         }
     }
 }
 
-fileprivate extension FileWatcher.Remote {
-    
-    final class URLSessionHandler: NSObject, URLSessionDelegate, URLSessionDownloadDelegate {
-        private var task: URLSessionDownloadTask? = nil
-        private var lastModified: String = ""
-        private var lastETag: String = ""
-        
-        private let callback: FileWatcher.UpdateClosure
-        private let url: URL
-        private lazy var session: URLSession = {
-            return URLSession(configuration: self.sessionConfiguration, delegate: self, delegateQueue: self.processingQueue)
-        }()
-        
-        private let processingQueue: OperationQueue = {
-            let queue = OperationQueue()
-            queue.maxConcurrentOperationCount = 1
-            return queue
-        }()
-        
-        private let sessionConfiguration: URLSessionConfiguration
-        
-        init(url: URL, sessionConfiguration: URLSessionConfiguration, callback: @escaping FileWatcher.UpdateClosure) {
-            self.url = url
-            self.sessionConfiguration = sessionConfiguration
-            self.callback = callback
-            super.init()
-        }
-        
-        deinit {
-            processingQueue.cancelAllOperations()
-        }
-        
-        func refresh() {
-            processingQueue.addOperation { [weak self] in
-                guard let strongSelf = self else { return }
-                
-                var request = URLRequest(url: strongSelf.url)
-                request.setValue(strongSelf.lastModified, forHTTPHeaderField: Constants.IfModifiedSinceKey)
-                request.setValue(strongSelf.lastETag, forHTTPHeaderField: Constants.IfNoneMatchKey)
-                
-                strongSelf.task = strongSelf.session.downloadTask(with: request)
-                strongSelf.task?.resume()
-            }
-        }
-        
-        fileprivate func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-            defer {
-                task = nil
-            }
-            guard let response = downloadTask.response as? HTTPURLResponse else {
-                assertionFailure("expected HTTPURLResponse received \(String(describing: downloadTask.response))")
-                return
-            }
-            
-            if response.statusCode == 304 {
-                DispatchQueue.main.async { [weak self] in
-                  self?.callback(.noChanges)
-                }
-                return
-            }
-            var isChanged = false
-            if let modified = response.allHeaderFields[Constants.LastModifiedKey] as? String {
-                if lastModified != modified {
-                    isChanged = true
-                }
-                lastModified = modified
-            }
-            
-            if let etag = response.allHeaderFields[Constants.ETagKey] as? String {
-                if lastETag != etag {
-                    isChanged = true
-                }
-                lastETag = etag
-            }
-            if !isChanged {
-                DispatchQueue.main.async { [weak self] in
-                  self?.callback(.noChanges)
-                }
-                return
-            }
-            guard let data = try? Data(contentsOf: location) else {
-                assertionFailure("can't load data from URL \(location)")
-                return
-            }
-            DispatchQueue.main.async { [weak self] in
-              self?.callback(.updated(data: data))
-            }
-        }
+// Pending request tasks retain their session until cancellation completes, so
+// stop/deinit cannot invalidate it while data(for:) is still creating a task.
+@MainActor
+private final class SessionLifetime {
+    let value: URLSession
+
+    init(configuration: URLSessionConfiguration) {
+        value = URLSession(configuration: configuration)
+    }
+
+    isolated deinit {
+        value.invalidateAndCancel()
     }
 }

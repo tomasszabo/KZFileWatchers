@@ -6,10 +6,14 @@
 //
 
 import Foundation
+#if SWIFT_PACKAGE
+import KZFileWatchers
+#endif
 
 /**
 Watcher for remote files, it supports both ETag and Last-Modified HTTP header tags.
 */
+@MainActor
 @objc
 public final class RemoteFileWatcher: NSObject {
 	
@@ -50,12 +54,18 @@ public final class RemoteFileWatcher: NSObject {
 extension RemoteFileWatcher: FileWatcherInput {
 	
 	public func start() throws {
-		try remoteWatcher.start { (result) in
-			switch result {
-			case .noChanges:
-				self.delegate?.refreshDidOccur(from: self, type: .noChanges, data: nil)
-			case .updated(let data):
-				self.delegate?.refreshDidOccur(from: self, type: .updated, data: data)
+		try remoteWatcher.start { [weak self] result in
+			Task { @MainActor [weak self] in
+				guard let self else { return }
+				switch result {
+				case .noChanges:
+					self.delegate?.refreshDidOccur(from: self, type: .noChanges, data: nil)
+				case .updated(let data):
+					self.delegate?.refreshDidOccur(from: self, type: .updated, data: data)
+				case .failed(let error):
+					NSLog("Remote watcher failed: %@", String(describing: error))
+					self.delegate?.refreshDidFail?(from: self, error: error as NSError)
+				}
 			}
 		}
 	}

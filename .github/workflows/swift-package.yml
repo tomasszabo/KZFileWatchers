@@ -1,0 +1,17 @@
+name: Swift 6 package
+on: [push, pull_request]
+jobs:
+  validate:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift test
+      - run: swift build -c release
+      - name: iOS simulator tests
+        run: |
+          DEVICE=$(xcrun simctl list devices available | sed -n 's/.*iPhone.*(\([A-F0-9-]*\)) (Shutdown).*/\1/p' | head -1)
+          test -n "$DEVICE"
+          DESTINATION="platform=iOS Simulator,id=$DEVICE" sh Scripts/test-package.sh test
+      - name: tvOS release build
+        run: DESTINATION='generic/platform=tvOS Simulator' sh Scripts/test-package.sh -configuration Release build
