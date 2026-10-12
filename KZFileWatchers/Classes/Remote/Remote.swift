@@ -80,7 +80,7 @@ public extension FileWatcher {
             callback = nil
         }
 
-        isolated deinit {
+        deinit {
             pollingTask?.cancel()
             requestTask?.cancel()
         }
@@ -130,15 +130,14 @@ public extension FileWatcher {
 
 // Pending request tasks retain their session until cancellation completes, so
 // stop/deinit cannot invalidate it while data(for:) is still creating a task.
-@MainActor
-private final class SessionLifetime {
+private final class SessionLifetime: Sendable {
     let value: URLSession
 
     init(configuration: URLSessionConfiguration) {
         value = URLSession(configuration: configuration)
     }
 
-    isolated deinit {
+    deinit {
         value.invalidateAndCancel()
     }
 }

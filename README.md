@@ -7,7 +7,7 @@ macOS 12+, iOS 15+, tvOS 15+**
 
 This fork's `modernization/swift6` branch compiles **all Swift targets in Swift 6
 language mode**, including the optional Objective-C adapters. It requires Swift
-tools/compiler **6.2+** (for isolated deinitialization), macOS 12+, iOS 15+ or
+tools/compiler **6.2+**, macOS 12+, iOS 15+ or
 tvOS 15+. There are no third-party package dependencies. This is a breaking API
 migration, not just compilation with a newer compiler.
 
@@ -28,13 +28,13 @@ migration, not just compilation with a newer compiler.
 
 ```swift
 .package(url: "https://github.com/tomasszabo/KZFileWatchers.git",
-         branch: "modernization/swift6")
+         branch: "master")
 ```
 
-The migration is currently on `modernization/swift6`. **After the PR is merged
-into this fork's `master`**, use `branch: "master"` in the SPM example above and
-`:branch => 'master'` in the CocoaPods example below. Pin a reviewed commit for
-reproducible builds; these instructions do not imply the PR is already merged.
+The migration is currently on `modernization/swift6`. The installation examples
+intentionally use **`master` for after the PR is merged**. Until then, select
+`modernization/swift6` to try Swift 6. Pin a reviewed commit for reproducible
+builds; these examples do not imply the PR is already merged.
 
 Add the `KZFileWatchers` product. For Objective-C use, add
 `KZFileWatchersObjC`, import that module and call adapters from the main thread.
@@ -47,7 +47,7 @@ older upstream release:
 
 ```ruby
 pod 'KZFileWatchers', :git => 'https://github.com/tomasszabo/KZFileWatchers.git',
-                    :branch => 'modernization/swift6'
+                    :branch => 'master'
 ```
 
 The fork podspec includes the Objective-C wrappers in the same module and sets
@@ -67,6 +67,11 @@ DESTINATION='generic/platform=tvOS Simulator' \
 
 Override `DESTINATION` for an available simulator. Tests use temporary files and
 an in-process HTTP protocol stub, with no external services or signing.
+Cleanup uses Sendable resource owners rather than `isolated deinit`, avoiding
+the older simulator/runtime crash reported in
+[Swift issue #85663](https://github.com/swiftlang/swift/issues/85663). The local
+dispatch-source owner has a narrowly scoped unchecked Sendable conformance:
+its handle is immutable and Dispatch cancellation is thread-safe.
 Validated with Xcode 27 / Swift 6.4: all 16 tests pass on macOS and the iOS
 simulator, macOS/iOS/tvOS Release builds pass, and unsigned iOS CocoaPods lint
 passes. No concurrency warnings occur in library sources. Older OS runtime

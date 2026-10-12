@@ -14,7 +14,7 @@ public extension FileWatcher {
         private let path: String
         private let refreshInterval: TimeInterval
         private let queue: DispatchQueue
-        private var source: (any DispatchSourceFileSystemObject)?
+        private var source: DispatchSourceLifetime?
         private var callback: UpdateClosure?
         private var reloadTask: Task<Void, Never>?
         private var previousContent: Data?
@@ -49,7 +49,7 @@ public extension FileWatcher {
             callback = nil
         }
 
-        isolated deinit {
+        deinit {
             reloadTask?.cancel()
             source?.cancel()
         }
@@ -72,8 +72,26 @@ public extension FileWatcher {
                 }
             }
             source.setCancelHandler { close(handle) }
-            self.source = source
             source.resume()
+            self.source = DispatchSourceLifetime(source)
+        }
+
+        // Dispatch source cancellation is thread-safe. Keeping the immutable handle
+        // in a Sendable owner avoids executor-hopping deinit runtime bugs on older OSes.
+        private final class DispatchSourceLifetime: @unchecked Sendable {
+            private let source: any DispatchSourceFileSystemObject
+
+            init(_ source: any DispatchSourceFileSystemObject) {
+                self.source = source
+            }
+
+            func cancel() {
+                source.cancel()
+            }
+
+            deinit {
+                source.cancel()
+            }
         }
 
         private func scheduleReload() {
